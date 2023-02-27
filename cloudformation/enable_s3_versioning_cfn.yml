@@ -1,0 +1,373 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Resources for AWS S3 Backup StackSet
+
+Parameters:
+  RulePrefix:
+    Type: String
+    Default: myprefix
+  RegionsList:
+    Type: CommaDelimitedList
+    Default: 'eu-west-1,us-east-1'
+
+Resources:   
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      RoleName: !Sub "${RulePrefix}-s3_enable_versioning_Lambda"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "${RulePrefix}-s3_enable_versioning_Lambda"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - s3:GetLifecycleConfiguration
+                  - s3:GetBucketTagging
+                  - s3:ListBucketVersions
+                  - s3:ListBucket
+                  - s3:ListBuckets
+                  - s3:GetBucketVersioning
+                  - s3:PutBucketVersioning
+                  - s3:PutLifecycleConfiguration
+                Resource: "*"
+
+  AwsS3BackupStacksetAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "AWSCloudFormationStackSetAdministrationRoleAwsS3Backup"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: "AWSCloudFormationStackSetExecutionRolePolicyAwsS3Backup"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - "arn:aws:iam::*:role/AWSCloudFormationStackSetExecutionRoleAwsS3Backup"
+                  
+  AwsS3BackupStackSetExecutionRole:
+    DependsOn: AwsS3BackupStacksetAdminRole
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "AWSCloudFormationStackSetExecutionRoleAwsS3Backup"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/AWSCloudFormationStackSetAdministrationRoleAwsS3Backup'
+            Action: 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  AwsS3BackupStackSet:
+    Type: AWS::CloudFormation::StackSet
+    DependsOn:
+      - AwsS3BackupStacksetAdminRole
+      - AwsS3BackupStackSetExecutionRole
+    Properties:
+      StackSetName: "myprefix-AwsS3Backup-NestedSS"
+      PermissionModel: "SELF_MANAGED"
+      AdministrationRoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/AWSCloudFormationStackSetAdministrationRoleAwsS3Backup"
+      ExecutionRoleName: "AWSCloudFormationStackSetExecutionRoleAwsS3Backup"
+      Capabilities:
+        - "CAPABILITY_NAMED_IAM"
+      StackInstancesGroup:
+        - DeploymentTargets:
+            Accounts:
+              - !Ref "AWS::AccountId"
+          Regions: !Ref RegionsList
+      OperationPreferences:
+        RegionConcurrencyType: PARALLEL
+        MaxConcurrentCount: 1
+        FailureToleranceCount: 0
+      TemplateBody: |
+        AWSTemplateFormatVersion: 2010-09-09
+        Description: Resources for AWS S3 Backup
+        Resources:           
+          LambdaFunction:
+            Type: AWS::Lambda::Function
+            Properties: 
+              FunctionName: !Sub "s3_enable_versioning_lambda"
+              Timeout: 30
+              Code:
+                ZipFile: |
+                  import boto3
+                  import os
+                  import sys
+                  from botocore.exceptions import ClientError
+
+                  allowed_keys    = ['backup','Backup']
+                  allowed_values  = ['true','True',True]
+                  tag_key   = 'backup'
+                  tag_value = 'true'
+                  retentionDays = 14
+                  rules = []
+
+                  lifecycle = {
+                        'ID': 's3-version-lifecycle',
+                        'Filter': {
+                          'Prefix': ''
+                        },
+                        'Status': 'Enabled',
+                        'NoncurrentVersionExpiration': {
+                          'NoncurrentDays': 14
+                        }
+                      }
+
+                  def lambda_handler(event, context):
+                    counter = 0
+                    tags_list = []
+                    print(event)
+                    try:
+                      if(event['detail']['eventName'] == 'PutBucketTagging'):
+                        result = event['detail']['requestParameters']['Tagging']['TagSet']['Tag']
+                        if(type(result)=='Dict'):
+                          print('Recived DICTIONARY event')
+                          while(counter < len(result)):
+                            output = (result[counter])
+                            print(output['Key'])
+                            if (output['Key'] in allowed_keys):
+                              print('tag versioning key found')
+                              if (output['Value'] in allowed_values):
+                                print('tag versioning value is ENABLE')
+
+                                #### Enable versioning ####
+
+                                response = enableVersioningS3(bucket)
+                                print('Enable versioning completed Successfully')
+                                response = get_lifecycle_configurations(bucket)
+                                print('Response from DICT',response)
+                                if(response== True):
+                                  print('Adding LifeCycle to S3 buckup')
+                                  if (LifeCycleBucket(bucket,rules) == True):
+                                    print('Lifecycle added')
+                                else:
+                                  print('Done')
+                                counter += 1  
+                            else:
+                              continue
+                              counter += 1
+                        else:
+                          print('Recived LIST event')
+                          for key in result:
+                            try:
+                               if (key['Key'] in allowed_keys):
+                                   print('tag versioning key found KEY !!')
+                                   if (key['Value'] in allowed_values):
+                                     print('tag versioning value is ENABLE')
+                                     if (deploy(bucket) == 'done'):
+                                       sys.exit(0)
+                                   else:
+                                     print(key['Value'],'Value not exists in allowed-list')
+                                     continue
+                               else:
+                                 print(key['Key'],'Key not exists in allowed-list')
+                                 continue
+                            except:
+                               if (result['Key'] in allowed_keys):
+                                   print('tag versioning key found RESULT')
+                                   if (result['Value'] in allowed_values):
+                                     print('tag versioning value is ENABLE')
+                                     if (deploy(bucket) == 'done'):
+                                       sys.exit(0)
+                                   else:
+                                     print(result['Value'],'Value not exists in allowed-list')
+                                     continue
+                               else:
+                                 print(result['Key'],'Key not exists in allowed-list')
+                                 continue
+                    except:
+                      if(event['detail-type'] == 'Scheduled Event'):
+                        client   = boto3.client('s3')
+                        response = client.list_buckets()
+                        for b in response['Buckets']:
+                            try:
+                                response = client.get_bucket_tagging(Bucket=b['Name'])
+                                tags = response['TagSet']
+                                for output in tags:
+                                    if (output['Key'] in allowed_keys):
+                                        print('tag versioning key found')
+                                        if (output['Value'] in allowed_values):
+                                            print('tag versioning value is ENABLE')
+                                            bucket = b['Name']
+                                            #### Enable versioning ####
+                                            response = enableVersioningS3(bucket)
+                                            print('Enable versioning completed Successfully')
+                                            response = get_lifecycle_configurations(bucket)
+                                            if(response== True):
+                                              print('Adding LifeCycle to S3 buckup')
+                                              if (LifeCycleBucket(bucket,rules) == True):
+                                                print('Lifecycle added')
+                                            else:
+                                              print('Done')
+                                        else:
+                                            print(output['Value'],'Value not exists in allowed-list')
+                                            continue
+                            except:
+                                continue
+
+                  def deploy(bucket):
+                     response = enableVersioningS3(bucket)
+                     if(response==True):
+                       print('Completed Successfully')
+                       print('Adding LifeCycle to S3 buckup')
+                       if (get_lifecycle_configurations(bucket) == True):
+                          return 'done'
+                     else:
+                       print(response)
+                       return response
+
+                  def enableVersioningS3(bucket):
+                    versioning = boto3.client('s3')
+
+                    response = versioning.put_bucket_versioning(
+                        Bucket=bucket,
+                        VersioningConfiguration={
+                            'Status': 'Enabled'
+                        }
+                    )
+                    if (response['ResponseMetadata']['HTTPStatusCode'] == 200):
+                        return True
+                    else:
+                        print(response)
+                        return False
+
+                  def LifeCycleBucket(bucket,rules):
+                    lifecycle = boto3.client('s3')
+
+                    try:
+                      print('CURRENT RULES',len(rules),rules,type(rules))
+                      response = lifecycle.put_bucket_lifecycle_configuration(
+                        Bucket=bucket,
+                        LifecycleConfiguration={
+                            'Rules': rules
+                        }
+                      )
+
+                      if (response['ResponseMetadata']['HTTPStatusCode'] == 200):
+                        return True
+                    except ClientError as error:
+                      print(error)
+
+                  def get_lifecycle_configurations(bucket):
+                    lifecycle = boto3.client('s3')
+                    try:
+                      response = lifecycle.get_bucket_lifecycle_configuration(
+                        Bucket=bucket
+                      )
+                      print(response)
+                      if (len(response['Rules']) > 0):
+                        rules = response['Rules']
+                        print('rules before checking of  included',rules)
+                        if ('' not in rules[0]['ID']):
+                          print('check if  there')
+                          rules.append(_lifecycle)
+                          if (LifeCycleBucket(bucket,rules) == True):
+                            print('LifeCycle added successfuly')
+                            return True
+                        else:
+                          print(' lifecycle policy already exists')
+                          return False
+                      else:
+                        rules.append(_lifecycle)
+                        if (LifeCycleBucket(bucket,rules) == True):
+                          print('LifeCycle added successfuly')
+                          return True
+                    except ClientError as error:
+                      rules = []
+                      if error.response['Error']['Code'] == 'NoSuchLifecycleConfiguration':
+                        rules.append(_lifecycle)
+                        if (LifeCycleBucket(bucket,rules) == True):
+                          print('LifeCycle added successfuly')
+                          return True                
+
+      
+              Description: s3_enable_versioning_lambda
+              Handler: index.lambda_handler
+              Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/myprefix-s3_enable_versioning_Lambda'
+              Runtime: python3.7
+          
+EventRule:
+  Type: AWS::Events::Rule
+  Properties:
+      Description: Enable S3 Versioning
+      Name: enable_s3_versioning
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource: 
+            - "s3.amazonaws.com"
+          eventName: 
+            - "PutBucketTagging"
+      State: ENABLED
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "LambdaFunction"
+              - "Arn"
+          Id: "TargetFunctionV1"
+LambdaInvokePermission:
+  Type: AWS::Lambda::Permission
+  Properties:
+    FunctionName: !GetAtt LambdaFunction.Arn
+    Action: 'lambda:InvokeFunction'
+    Principal: events.amazonaws.com
+    SourceAccount: !Ref 'AWS::AccountId'
+    SourceArn: !GetAtt EventRule.Arn
+  DependsOn:
+    - LambdaFunction
+EventRuleScheduled:
+  Type: AWS::Events::Rule
+  Properties:
+    Description: Enable S3 Versioning scheduled
+    Name: enableS3VersioningScheduled
+    ScheduleExpression: "cron(00 00 * * ? *)"
+    State: ENABLED
+    Targets: 
+      - 
+        Arn: 
+          Fn::GetAtt: 
+            - "LambdaFunction"
+            - "Arn"
+        Id: "TargetFunctionV2"
+LambdaInvokePermissionScheduler:
+  Type: AWS::Lambda::Permission
+  Properties:
+    FunctionName: !GetAtt LambdaFunction.Arn
+    Action: 'lambda:InvokeFunction'
+    Principal: events.amazonaws.com
+    SourceAccount: !Ref 'AWS::AccountId'
+    SourceArn: !GetAtt EventRuleScheduled.Arn
+  DependsOn:
+    - LambdaFunction
+    - EventRuleScheduled

@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Trigger Lambda with EventBridge when EC2 instance created
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      RoleName: !Sub "auto_tagging_ec2_instance"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "auto_tagging_ec2_instance"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+        Description: Trigger Lambda - Instance created
+        Name: trigger_lambda_instance_created
+        EventPattern:
+          source:
+            - aws.ec2
+          detail-type:
+            - "AWS API Call via CloudTrail"
+          detail:
+            eventSource: 
+              - "ec2.amazonaws.com"
+            eventName: 
+              - "StartInstance"
+        State: ENABLED
+        Targets: 
+          - 
+            Arn: 
+              Fn::GetAtt: 
+                - "LambdaFunction"
+                - "Arn"
+            Id: "TargetFunction"
+        
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties: 
+      FunctionName: "trigger_lambda_instance_created"
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          from botocore.exceptions import ClientError
+
+          def lambda_handler(event, context):
+            print(event)
+            if (event['detail']['eventName']=='StartInstance'):
+              print('Write your code here')
+
+      Description: trigger_lambda_instance_created
+      Handler: index.lambda_handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/auto_tagging_ec2_instance'
+      Runtime: python3.9
+    DependsOn:
+      - LambdaRole
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !GetAtt EventRule.Arn
+    DependsOn:
+      - LambdaFunction
+  
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/trigger_lambda_instance_created
