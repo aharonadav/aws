@@ -37,12 +37,12 @@ Resources:
           source:
             - aws.ec2
           detail-type:
-            - "AWS API Call via CloudTrail"
+            - "EC2 Instance State-change Notification"
           detail:
             eventSource: 
               - "ec2.amazonaws.com"
             eventName: 
-              - "StartInstance"
+              - "pending"
         State: ENABLED
         Targets: 
           - 
@@ -64,9 +64,8 @@ Resources:
 
           def lambda_handler(event, context):
             print(event)
-            if (event['detail']['eventName']=='StartInstance'):
-              print('Write your code here')
-
+            print('Write your code here')
+              
       Description: trigger_lambda_instance_created
       Handler: index.lambda_handler
       Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/auto_tagging_ec2_instance'
